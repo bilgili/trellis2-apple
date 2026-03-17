@@ -6,9 +6,69 @@ import cv2
 from PIL import Image
 import trimesh
 import trimesh.visual
-from flex_gemm.ops.grid_sample import grid_sample_3d
-import nvdiffrast.torch as dr
-import cumesh
+
+import platform
+
+_HAS_DR = False
+_HAS_MESH = False
+_BACKEND = None
+dr = None
+
+# Differentiable rasterizer — mtldiffrast (Metal) or nvdiffrast (CUDA)
+try:
+    import mtldiffrast.torch as dr
+    _HAS_DR = True
+    _BACKEND = 'metal'
+except ImportError:
+    try:
+        import nvdiffrast.torch as dr
+        _HAS_DR = True
+        _BACKEND = 'cuda'
+    except ImportError:
+        pass
+
+# Mesh processing — cumesh auto-selects Metal/CUDA
+try:
+    import cumesh
+    _MeshBackend = cumesh.CuMesh
+    _BVH = cumesh.cuBVH
+    _remesh_narrow_band_dc = cumesh.remeshing.remesh_narrow_band_dc
+    _HAS_MESH = True
+    if _BACKEND is None:
+        _BACKEND = 'metal' if platform.system() == 'Darwin' else 'cuda'
+except ImportError:
+    pass
+
+_HAS_GPU_DEPS = _HAS_DR and _HAS_MESH
+
+try:
+    from flex_gemm.ops.grid_sample import grid_sample_3d as _flex_grid_sample_3d
+    _HAS_FLEX_GEMM = True
+except ImportError:
+    _HAS_FLEX_GEMM = False
+
+
+def _grid_sample_3d(feats, coords, shape, grid, mode='trilinear'):
+    """Grid sampling with flex_gemm on CUDA, F.grid_sample fallback otherwise."""
+    if _HAS_FLEX_GEMM:
+        return _flex_grid_sample_3d(feats, coords, shape, grid, mode=mode)
+    import torch.nn.functional as F_gs
+    B, C = shape[0], shape[1]
+    D, H, W = shape[2], shape[3], shape[4]
+    device = feats.device
+    dense_vol = torch.zeros(B, C, D, H, W, dtype=feats.dtype, device=device)
+    batch_idx = coords[:, 0].long()
+    cx, cy, cz = coords[:, 1].long(), coords[:, 2].long(), coords[:, 3].long()
+    dense_vol[batch_idx, :, cx, cy, cz] = feats
+    grid_norm = torch.stack([
+        grid[..., 2] / (W - 1) * 2 - 1,
+        grid[..., 1] / (H - 1) * 2 - 1,
+        grid[..., 0] / (D - 1) * 2 - 1,
+    ], dim=-1).reshape(B, 1, 1, -1, 3)
+    sampled = F_gs.grid_sample(dense_vol, grid_norm, mode='bilinear',
+                               align_corners=True, padding_mode='border')
+    M = grid.shape[1]
+    return sampled.reshape(B * C, M)
 
 
 def to_glb(
@@ -57,6 +117,27 @@ def to_glb(
         verbose: whether to print verbose messages
         use_tqdm: whether to use tqdm to display progress bar
     """
+    # Auto-fallback to CPU pipeline when no GPU deps available
+    if not _HAS_GPU_DEPS:
+        from .postprocess_cpu import to_glb as to_glb_cpu
+        return to_glb_cpu(
+            vertices=vertices, faces=faces, attr_volume=attr_volume,
+            coords=coords, attr_layout=attr_layout, aabb=aabb,
+            voxel_size=voxel_size, grid_size=grid_size,
+            decimation_target=decimation_target, texture_size=texture_size,
+            remesh=remesh, remesh_band=remesh_band, remesh_project=remesh_project,
+            verbose=verbose, use_tqdm=use_tqdm,
+        )
+
+    # Select device based on backend
+    # Metal path: all GPU compute goes through Metal kernels directly (mtldiffrast,
+    # mtlbvh, cumesh, flex_gemm). CPU tensors on Apple Silicon unified memory are
+    # directly GPU-accessible — no MPS overhead needed.
+    if _BACKEND == 'metal':
+        device = torch.device('cpu')
+    else:
+        device = torch.device('cuda')
+
     # --- Input Normalization (AABB, Voxel Size, Grid Size) ---
     if isinstance(aabb, (list, tuple)):
         aabb = np.array(aabb)
@@ -98,11 +179,11 @@ def to_glb(
         print(f"Original mesh: {vertices.shape[0]} vertices, {faces.shape[0]} faces")
 
     # Move data to GPU
-    vertices = vertices.cuda()
-    faces = faces.cuda()
-    
-    # Initialize CUDA mesh handler
-    mesh = cumesh.CuMesh()
+    vertices = vertices.to(device)
+    faces = faces.to(device)
+
+    # Initialize mesh handler
+    mesh = _MeshBackend()
     mesh.init(vertices, faces)
     
     # --- Initial Mesh Cleaning ---
@@ -119,7 +200,7 @@ def to_glb(
         pbar.set_description("Building BVH")
     if verbose:
         print(f"Building BVH for current mesh...", end='', flush=True)
-    bvh = cumesh.cuBVH(vertices, faces)
+    bvh = _BVH(vertices, faces)
     if use_tqdm:
         pbar.update(1)
     if verbose:
@@ -168,7 +249,7 @@ def to_glb(
         resolution = grid_size.max().item()
         
         # Perform Dual Contouring remeshing (rebuilds topology)
-        mesh.init(*cumesh.remeshing.remesh_narrow_band_dc(
+        mesh.init(*_remesh_narrow_band_dc(
             vertices, faces,
             center = center,
             scale = (resolution + 3 * remesh_band) / resolution * scale,
@@ -180,8 +261,16 @@ def to_glb(
         ))
         if verbose:
             print(f"After remeshing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
-        
-        # Simplify and clean the remeshed result (similar logic to above)
+
+        # Clean up topology before simplification
+        mesh.remove_duplicate_faces()
+        mesh.repair_non_manifold_edges()
+        mesh.remove_small_connected_components(1e-5)
+        mesh.fill_holes(max_hole_perimeter=3e-2)
+        if verbose:
+            print(f"After cleanup: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
+
+        # Simplify and clean the remeshed result
         mesh.simplify(decimation_target, verbose=verbose)
         if verbose:
             print(f"After simplifying: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
@@ -208,10 +297,10 @@ def to_glb(
         return_vmaps=True,
         verbose=verbose,
     )
-    out_vertices = out_vertices.cuda()
-    out_faces = out_faces.cuda()
-    out_uvs = out_uvs.cuda()
-    out_vmaps = out_vmaps.cuda()
+    out_vertices = out_vertices.to(device)
+    out_faces = out_faces.to(device)
+    out_uvs = out_uvs.to(device)
+    out_vmaps = out_vmaps.to(device)
     mesh.compute_vertex_normals()
     out_normals = mesh.read_vertex_normals()[out_vmaps]
     
@@ -227,10 +316,10 @@ def to_glb(
         print("Sampling attributes...", end='', flush=True)
         
     # Setup differentiable rasterizer context
-    ctx = dr.RasterizeCudaContext()
+    ctx = dr.MtlRasterizeContext() if _BACKEND == 'metal' else dr.RasterizeCudaContext()
     # Prepare UV coordinates for rasterization (rendering in UV space)
     uvs_rast = torch.cat([out_uvs * 2 - 1, torch.zeros_like(out_uvs[:, :1]), torch.ones_like(out_uvs[:, :1])], dim=-1).unsqueeze(0)
-    rast = torch.zeros((1, texture_size, texture_size, 4), device='cuda', dtype=torch.float32)
+    rast = torch.zeros((1, texture_size, texture_size, 4), device=device, dtype=torch.float32)
     
     # Rasterize in chunks to save memory
     for i in range(0, out_faces.shape[0], 100000):
@@ -256,8 +345,8 @@ def to_glb(
     valid_pos = (orig_tri_verts * uvw.unsqueeze(-1)).sum(dim=1)
     
     # Trilinear sampling from the attribute volume (Color, Material props)
-    attrs = torch.zeros(texture_size, texture_size, attr_volume.shape[1], device='cuda')
-    attrs[mask] = grid_sample_3d(
+    attrs = torch.zeros(texture_size, texture_size, attr_volume.shape[1], device=device)
+    attrs[mask] = _grid_sample_3d(
         attr_volume,
         torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1),
         shape=torch.Size([1, attr_volume.shape[1], *grid_size.tolist()]),
@@ -282,7 +371,14 @@ def to_glb(
     metallic = np.clip(attrs[..., attr_layout['metallic']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
     roughness = np.clip(attrs[..., attr_layout['roughness']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
     alpha = np.clip(attrs[..., attr_layout['alpha']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
-    alpha_mode = 'OPAQUE'
+    # Auto-detect transparency from baked alpha values
+    alpha_valid = alpha[mask]
+    if alpha_valid.size > 0 and alpha_valid.min() < 250:
+        alpha_mode = 'BLEND'
+        if verbose:
+            print(f"Detected transparency (alpha min={alpha_valid.min()}), using BLEND mode")
+    else:
+        alpha_mode = 'OPAQUE'
     
     # Inpainting: fill gaps (dilation) to prevent black seams at UV boundaries
     mask_inv = (~mask).astype(np.uint8)
@@ -309,10 +405,10 @@ def to_glb(
     uvs_np = out_uvs.cpu().numpy()
     normals_np = out_normals.cpu().numpy()
     
-    # Swap Y and Z axes, invert Y (common conversion for GLB compatibility)
+    # Y-up to Z-up for GLB
     vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2], -vertices_np[:, 1]
     normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2], -normals_np[:, 1]
-    uvs_np[:, 1] = 1 - uvs_np[:, 1] # Flip UV V-coordinate
+    uvs_np[:, 1] = 1 - uvs_np[:, 1]
     
     textured_mesh = trimesh.Trimesh(
         vertices=vertices_np,

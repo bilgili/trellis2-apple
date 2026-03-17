@@ -211,6 +211,52 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
             max_q_seqlen = max(q_seqlen)
             max_kv_seqlen = max(kv_seqlen)
         out = flash_attn_3.flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_q_seqlen, max_kv_seqlen)
+    elif config.ATTN == 'sdpa':
+        import torch.nn.functional as F_attn
+        if num_all_args == 1:
+            q, k, v = qkv.unbind(dim=1)
+        elif num_all_args == 2:
+            k, v = kv.unbind(dim=1)
+        # Pad variable-length sequences into dense batch [N, max_len, H, C]
+        N = len(q_seqlen)
+        max_q = max(q_seqlen)
+        max_kv = max(kv_seqlen)
+        H = q.shape[-2]
+        C_q = q.shape[-1]
+        C_v = v.shape[-1]
+        # Build dense tensors
+        q_dense = q.new_zeros(N, max_q, H, C_q)
+        k_dense = k.new_zeros(N, max_kv, H, C_q)
+        v_dense = v.new_zeros(N, max_kv, H, C_v)
+        # Build attention mask
+        attn_mask = torch.zeros(N, max_q, max_kv, dtype=torch.bool, device=device)
+        q_offset = 0
+        kv_offset = 0
+        for i in range(N):
+            ql = q_seqlen[i]
+            kvl = kv_seqlen[i]
+            q_dense[i, :ql] = q[q_offset:q_offset + ql]
+            k_dense[i, :kvl] = k[kv_offset:kv_offset + kvl]
+            v_dense[i, :kvl] = v[kv_offset:kv_offset + kvl]
+            attn_mask[i, :ql, :kvl] = True
+            q_offset += ql
+            kv_offset += kvl
+        # sdpa expects [N, H, L, C], mask broadcastable to [N, H, Lq, Lkv]
+        q_dense = q_dense.permute(0, 2, 1, 3)  # [N, H, Lq, C]
+        k_dense = k_dense.permute(0, 2, 1, 3)  # [N, H, Lkv, C]
+        v_dense = v_dense.permute(0, 2, 1, 3)  # [N, H, Lkv, C_v]
+        # Expand mask for heads: [N, 1, Lq, Lkv]
+        sdpa_mask = attn_mask.unsqueeze(1)
+        # Use float mask for MPS compatibility (bool masks not supported)
+        float_mask = torch.zeros_like(sdpa_mask, dtype=q_dense.dtype)
+        float_mask.masked_fill_(~sdpa_mask, float('-inf'))
+        out_dense = F_attn.scaled_dot_product_attention(q_dense, k_dense, v_dense, attn_mask=float_mask)
+        # out_dense: [N, H, Lq, C_v] -> unpad back to packed
+        out_dense = out_dense.permute(0, 2, 1, 3)  # [N, Lq, H, C_v]
+        out_parts = []
+        for i in range(N):
+            out_parts.append(out_dense[i, :q_seqlen[i]])
+        out = torch.cat(out_parts, dim=0)
     else:
         raise ValueError(f"Unknown attention module: {config.ATTN}")
     

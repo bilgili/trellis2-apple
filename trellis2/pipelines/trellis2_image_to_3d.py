@@ -1,4 +1,5 @@
 from typing import *
+import gc
 import torch
 import torch.nn as nn
 import numpy as np
@@ -8,6 +9,15 @@ from . import samplers, rembg
 from ..modules.sparse import SparseTensor
 from ..modules import image_feature_extractor
 from ..representations import Mesh, MeshWithVoxel
+
+
+def _free_memory():
+    """Aggressively free memory after model offload."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif hasattr(torch, 'mps') and hasattr(torch.mps, 'empty_cache'):
+        torch.mps.empty_cache()
 
 
 class Trellis2ImageTo3DPipeline(Pipeline):
@@ -147,6 +157,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             output = self.rembg_model(input)
             if self.low_vram:
                 self.rembg_model.cpu()
+                _free_memory()
         output_np = np.array(output)
         alpha = output_np[:, :, 3]
         bbox = np.argwhere(alpha > 0.8 * 255)
@@ -177,6 +188,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         cond = self.image_cond_model(image)
         if self.low_vram:
             self.image_cond_model.cpu()
+            _free_memory()
         if not include_neg_cond:
             return {'cond': cond}
         neg_cond = torch.zeros_like(cond)
@@ -219,7 +231,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         ).samples
         if self.low_vram:
             flow_model.cpu()
-        
+            _free_memory()
+
         # Decode sparse structure latent
         decoder = self.models['sparse_structure_decoder']
         if self.low_vram:
@@ -227,6 +240,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         decoded = decoder(z_s)>0
         if self.low_vram:
             decoder.cpu()
+            _free_memory()
         if resolution != decoded.shape[2]:
             ratio = decoded.shape[2] // resolution
             decoded = torch.nn.functional.max_pool3d(decoded.float(), ratio, ratio, 0) > 0.5
@@ -267,13 +281,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         ).samples
         if self.low_vram:
             flow_model.cpu()
+            _free_memory()
 
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
-        
+
         return slat
-    
+
     def sample_shape_slat_cascade(
         self,
         lr_cond: dict,
@@ -312,10 +327,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         ).samples
         if self.low_vram:
             flow_model_lr.cpu()
+            _free_memory()
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
-        
+
         # Upsample
         if self.low_vram:
             self.models['shape_slat_decoder'].to(self.device)
@@ -324,6 +340,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             self.models['shape_slat_decoder'].cpu()
             self.models['shape_slat_decoder'].low_vram = False
+            _free_memory()
         hr_resolution = resolution
         while True:
             quant_coords = torch.cat([
@@ -356,11 +373,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         ).samples
         if self.low_vram:
             flow_model.cpu()
+            _free_memory()
 
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
-        
+
         return slat, hr_resolution
 
     def decode_shape_slat(
@@ -386,8 +404,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             self.models['shape_slat_decoder'].cpu()
             self.models['shape_slat_decoder'].low_vram = False
+            _free_memory()
         return ret
-    
+
     def sample_tex_slat(
         self,
         cond: dict,
@@ -424,11 +443,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         ).samples
         if self.low_vram:
             flow_model.cpu()
+            _free_memory()
 
         std = torch.tensor(self.tex_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.tex_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
-        
+
         return slat
 
     def decode_tex_slat(
@@ -450,6 +470,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         ret = self.models['tex_slat_decoder'](slat, guide_subs=subs) * 0.5 + 0.5
         if self.low_vram:
             self.models['tex_slat_decoder'].cpu()
+            _free_memory()
         return ret
     
     @torch.no_grad()
@@ -587,7 +608,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif hasattr(torch, 'mps') and hasattr(torch.mps, 'empty_cache'):
+            torch.mps.empty_cache()
         out_mesh = self.decode_latent(shape_slat, tex_slat, res)
         if return_latent:
             return out_mesh, (shape_slat, tex_slat, res)

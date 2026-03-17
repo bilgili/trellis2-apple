@@ -15,6 +15,10 @@ https://github.com/user-attachments/assets/63b43a7e-acc7-4c81-a900-6da450527d8f
 **TRELLIS.2** is a state-of-the-art large 3D generative model (4B parameters) designed for high-fidelity **image-to-3D** generation. It leverages a novel "field-free" sparse voxel structure termed **O-Voxel** to reconstruct and generate arbitrary 3D assets with complex topologies, sharp features, and full PBR materials.
 
 
+## 🍎 Apple Silicon Fork
+
+This fork adds an **MLX backend** for native Apple Silicon (M-series) inference, with Metal GPU acceleration for mesh postprocessing via `mtldiffrast`, `cumesh`, and `flex_gemm`. The original CUDA pipeline is fully preserved. See `mlx_backend/` for details and `requirements_macos.txt` for macOS dependencies.
+
 ## ✨ Features
 
 ### 1. High Quality, Resolution & Efficiency

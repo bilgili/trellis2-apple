@@ -8,7 +8,7 @@ from PIL import Image
 class BiRefNet:
     def __init__(self, model_name: str = "ZhengPeng7/BiRefNet"):
         self.model = AutoModelForImageSegmentation.from_pretrained(
-            model_name, trust_remote_code=True
+            model_name, trust_remote_code=True,
         )
         self.model.eval()
         self.transform_image = transforms.Compose(
@@ -18,20 +18,21 @@ class BiRefNet:
                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
             ]
         )
-    
-    def to(self, device: str):
+        self._device = 'cpu'
+
+    def to(self, device):
+        self._device = device
         self.model.to(device)
 
     def cuda(self):
-        self.model.cuda()
+        self.to('cuda')
 
     def cpu(self):
-        self.model.cpu()
-        
+        self.to('cpu')
+
     def __call__(self, image: Image.Image) -> Image.Image:
         image_size = image.size
-        input_images = self.transform_image(image).unsqueeze(0).to("cuda")
-        # Prediction
+        input_images = self.transform_image(image).unsqueeze(0).to(self._device)
         with torch.no_grad():
             preds = self.model(input_images)[-1].sigmoid().cpu()
         pred = preds[0].squeeze()
