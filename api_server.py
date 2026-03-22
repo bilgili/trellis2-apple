@@ -8,6 +8,17 @@ Usage:
     python api_server.py --weights weights/TRELLIS.2-4B --port 8082
 """
 import os
+import sys
+
+# Environment defaults — set before any torch/trellis imports
+os.environ.setdefault("SPARSE_CONV_BACKEND", "flex_gemm")
+os.environ.setdefault("ATTN_BACKEND", "sdpa")
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")  # deform_conv2d in RMBG
+
+# Add o-voxel to path if present
+_ovoxel = os.path.join(os.path.dirname(os.path.abspath(__file__)), "o-voxel")
+if os.path.isdir(_ovoxel) and _ovoxel not in sys.path:
+    sys.path.insert(0, _ovoxel)
 import io
 import base64
 import time

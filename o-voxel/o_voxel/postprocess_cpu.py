@@ -391,7 +391,7 @@ def to_glb(
         metallicFactor=1.0,
         roughnessFactor=1.0,
         alphaMode=alpha_mode,
-        doubleSided=True if not remesh else False,
+        doubleSided=True,
     )
 
     # Coordinate system conversion (Y-up to Z-up for GLB)

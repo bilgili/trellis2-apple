@@ -172,8 +172,6 @@ class MlxSparseStructureFlowModel(nn.Module):
                 rope_cache = (self._rope_cos, self._rope_sin)
                 for i, block in enumerate(self.blocks):
                     h = block(h, t_emb, cond, rope_cache=rope_cache)
-                    if (i + 1) % 10 == 0:
-                        mx.eval(h)  # periodic eval to bound memory in fallback path
         else:
             if self._compiled_blocks is None:
                 try:
@@ -185,10 +183,8 @@ class MlxSparseStructureFlowModel(nn.Module):
             if self._compiled_blocks:
                 h = self._compiled_blocks(h, t_emb, cond)
             else:
-                for i, block in enumerate(self.blocks):
+                for block in self.blocks:
                     h = block(h, t_emb, cond, rope_cache=None)
-                    if (i + 1) % 10 == 0:
-                        mx.eval(h)
 
         logger.debug("[MLX] StructureFlow blocks done, mem=%s", _metal_mem_mb())
 
@@ -320,10 +316,8 @@ class MlxSLatFlowModel(nn.Module):
                 h = self._compiled_blocks(h, t_emb, cond, rope_cos, rope_sin)
             else:
                 rope_cache = (rope_cos, rope_sin)
-                for i, block in enumerate(self.blocks):
+                for block in self.blocks:
                     h = block(h, t_emb, cond, rope_cache=rope_cache)
-                    if (i + 1) % 10 == 0:
-                        mx.eval(h)
         else:
             if self._compiled_blocks is None:
                 try:
@@ -335,10 +329,8 @@ class MlxSLatFlowModel(nn.Module):
             if self._compiled_blocks:
                 h = self._compiled_blocks(h, t_emb, cond)
             else:
-                for i, block in enumerate(self.blocks):
+                for block in self.blocks:
                     h = block(h, t_emb, cond, rope_cache=None)
-                    if (i + 1) % 10 == 0:
-                        mx.eval(h)
 
         logger.debug("[MLX] SLatFlow blocks done, N=%d, mem=%s", N, _metal_mem_mb())
 

@@ -396,7 +396,7 @@ def to_glb(
         metallicFactor=1.0,
         roughnessFactor=1.0,
         alphaMode=alpha_mode,
-        doubleSided=True if not remesh else False,
+        doubleSided=True,
     )
     
     # --- Coordinate System Conversion & Final Object ---
@@ -405,9 +405,9 @@ def to_glb(
     uvs_np = out_uvs.cpu().numpy()
     normals_np = out_normals.cpu().numpy()
     
-    # Y-up to Z-up for GLB
-    vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2], -vertices_np[:, 1]
-    normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2], -normals_np[:, 1]
+    # Y-up to Z-up for GLB (must copy to avoid in-place corruption)
+    vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2].copy(), -vertices_np[:, 1].copy()
+    normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2].copy(), -normals_np[:, 1].copy()
     uvs_np[:, 1] = 1 - uvs_np[:, 1]
     
     textured_mesh = trimesh.Trimesh(
