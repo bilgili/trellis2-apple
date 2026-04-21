@@ -213,19 +213,29 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
         out = flash_attn_3.flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_q_seqlen, max_kv_seqlen)
     elif config.ATTN == 'flex_gemm_sparse_attn':
         # Fused variable-length sparse attention (mtlgemm Metal kernel).
-        # Keeps everything on MPS — avoids the MPS->CPU->MPS round-trip that
-        # SDPA-padded forces on PyTorch builds where new_zeros for MPS
-        # fp16/fp32 is broken. Wins measurably when max_seqlen is small-ish
-        # (trellis2 decoder's typical case); at larger max_seqlen the current
-        # naive per-thread-serial-KV kernel is slower than Accelerate-backed
-        # SDPA, so we fall back. Threshold is conservative; measured
-        # crossover was around 256-512 on M3 Max.
-        FUSED_ATTN_MAX_SEQLEN = 256
+        # Dispatch is unconditional, matching the CUDA backends above
+        # (xformers / flash_attn / flash_attn_3) which never fork on
+        # max_seqlen. The underlying kernel is flash-attention-v2 with
+        # simdgroup_matrix_multiply_accumulate for Q@K^T and P@V, and
+        # parallelized online-softmax row reductions via simd_shuffle_xor.
+        #
+        # Optional safety-valve: FLEX_GEMM_ATTN_MAX_SEQLEN=N falls back to
+        # the SDPA-padded path when max(q_seqlen, kv_seqlen) > N. Useful on
+        # PyTorch builds where the Accelerate-SDPA-CPU-bounce is actually
+        # faster at the specific shapes the user hits (rare; measured
+        # crossover sits beyond 768 on fp32 and likely higher on fp16).
+        import os as _os
+        _cap_env = _os.environ.get('FLEX_GEMM_ATTN_MAX_SEQLEN', '0')
+        try:
+            _cap = int(_cap_env)
+        except ValueError:
+            _cap = 0
         if num_all_args == 1:
             q, k, v = qkv.unbind(dim=1)
         elif num_all_args == 2:
             k, v = kv.unbind(dim=1)
-        if max(max(q_seqlen), max(kv_seqlen)) <= FUSED_ATTN_MAX_SEQLEN:
+        _use_fused = (_cap <= 0) or (max(max(q_seqlen), max(kv_seqlen)) <= _cap)
+        if _use_fused:
             import flex_gemm, math
             scale = 1.0 / math.sqrt(q.shape[-1])
             csq = torch.cat([torch.tensor([0]), torch.cumsum(torch.tensor(q_seqlen), 0)]).int().to(device)
@@ -235,8 +245,8 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
                 csq, cskv, max(q_seqlen), max(kv_seqlen), scale,
             )
         else:
-            # Fall through to the SDPA implementation below by mirroring its
-            # preamble here (we already have q/k/v unbound).
+            # FLEX_GEMM_ATTN_MAX_SEQLEN safety-valve active — fall back to
+            # SDPA-padded. Mirror the SDPA preamble (q/k/v already unbound).
             import torch.nn.functional as F_attn
             N_b = len(q_seqlen)
             max_q = max(q_seqlen); max_kv = max(kv_seqlen)
