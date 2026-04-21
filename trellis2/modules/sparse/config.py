@@ -10,11 +10,17 @@ def __detect_defaults():
     """Auto-detect best backends for current platform."""
     global CONV, ATTN
     if platform.system() == 'Darwin':
-        ATTN = 'sdpa'
         if __flex_gemm_works_on_mps():
             CONV = 'flex_gemm'
+            # flex_gemm_sparse_attn is now flash-attention-v2 with simdgroup
+            # matmul + simd-shuffle softmax (5–15× over SDPA-padded-CPU-bounce
+            # at every measured shape including max_seqlen=2048). The conv
+            # probe above covers the same package, so if it passed, the
+            # attention path is available too.
+            ATTN = 'flex_gemm_sparse_attn'
         else:
             CONV = 'pytorch'
+            ATTN = 'sdpa'
     elif not __has_cuda():
         CONV = 'pytorch'
         ATTN = 'sdpa'
@@ -97,6 +103,6 @@ def set_debug(debug: bool):
     global DEBUG
     DEBUG = debug
 
-def set_attn_backend(backend: Literal['xformers', 'flash_attn', 'sdpa']):
+def set_attn_backend(backend: Literal['xformers', 'flash_attn', 'flash_attn_3', 'sdpa', 'flex_gemm_sparse_attn']):
     global ATTN
     ATTN = backend

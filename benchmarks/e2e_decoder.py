@@ -15,12 +15,18 @@ Run:
     python benchmarks/e2e_decoder.py
 """
 import os
+import sys
 import time
 import math
 
 os.environ.setdefault("SPARSE_CONV_BACKEND", "flex_gemm")
 os.environ.setdefault("SPARSE_ATTN_BACKEND", "flex_gemm_sparse_attn")
 os.environ.setdefault("FLEX_GEMM_QUIET", "1")
+
+# trellis2 is in-tree (no pip install) — make the bench runnable as
+# `python benchmarks/e2e_decoder.py` regardless of cwd by putting the
+# repo root on sys.path before any trellis2 import.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
