@@ -78,7 +78,9 @@ def __from_env():
         CONV = env_sparse_conv_backend
     if env_sparse_debug is not None:
         DEBUG = env_sparse_debug == '1'
-    if env_sparse_attn_backend is not None and env_sparse_attn_backend in ['xformers', 'flash_attn', 'flash_attn_3', 'sdpa']:
+    if env_sparse_attn_backend is not None and env_sparse_attn_backend in [
+        'xformers', 'flash_attn', 'flash_attn_3', 'sdpa', 'flex_gemm_sparse_attn',
+    ]:
         ATTN = env_sparse_attn_backend
 
     print(f"[SPARSE] Conv backend: {CONV}; Attention backend: {ATTN}")
