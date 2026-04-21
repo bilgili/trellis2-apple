@@ -11,14 +11,35 @@ def __detect_defaults():
     global CONV, ATTN
     if platform.system() == 'Darwin':
         ATTN = 'sdpa'
-        try:
-            import flex_gemm
+        if __flex_gemm_works_on_mps():
             CONV = 'flex_gemm'
-        except ImportError:
+        else:
             CONV = 'pytorch'
     elif not __has_cuda():
         CONV = 'pytorch'
         ATTN = 'sdpa'
+
+
+def __flex_gemm_works_on_mps():
+    """Probe flex_gemm with a tiny MPS conv. If the install pre-dates the
+    device-routing fix (or fails to build), it returns a CPU tensor — fall
+    back to the pure-PyTorch backend rather than crashing inside the model
+    on the first LayerNorm. Build tensors on CPU and move to MPS because some
+    PyTorch builds lack int/fp16 torch.zeros kernels on MPS."""
+    try:
+        import torch
+        if not torch.backends.mps.is_available():
+            return False
+        import flex_gemm
+        from flex_gemm.ops.spconv import sparse_submanifold_conv3d, Algorithm, set_algorithm
+        set_algorithm(Algorithm.IMPLICIT_GEMM)
+        coords = torch.tensor([[0, 0, 0, 0]], dtype=torch.int32).to('mps')
+        feats = torch.zeros((1, 4), dtype=torch.float16).to('mps')
+        weight = torch.zeros((4, 1, 1, 1, 4), dtype=torch.float16).to('mps')
+        out, _ = sparse_submanifold_conv3d(feats, coords, torch.Size([1, 4, 1, 1, 1]), weight)
+        return out.device.type == 'mps'
+    except Exception:
+        return False
 
 def __has_cuda():
     try:
