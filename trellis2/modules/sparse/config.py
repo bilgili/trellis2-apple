@@ -21,23 +21,34 @@ def __detect_defaults():
 
 
 def __flex_gemm_works_on_mps():
-    """Probe flex_gemm with a tiny MPS conv. If the install pre-dates the
-    device-routing fix (or fails to build), it returns a CPU tensor — fall
-    back to the pure-PyTorch backend rather than crashing inside the model
-    on the first LayerNorm. Build tensors on CPU and move to MPS because some
-    PyTorch builds lack int/fp16 torch.zeros kernels on MPS."""
+    """Probe flex_gemm with tiny MPS convs covering both IMPLICIT_GEMM and
+    MASKED_IMPLICIT_GEMM. If the install pre-dates the device-routing fix
+    (or pre-dates the real masked kernel in round 2), one of these returns
+    a CPU tensor — fall back to the pure-PyTorch backend rather than
+    crashing inside the model on the first LayerNorm. Build tensors on CPU
+    and move to MPS because some PyTorch builds lack int/fp16 torch.zeros
+    kernels on MPS."""
     try:
         import torch
         if not torch.backends.mps.is_available():
             return False
         import flex_gemm
         from flex_gemm.ops.spconv import sparse_submanifold_conv3d, Algorithm, set_algorithm
-        set_algorithm(Algorithm.IMPLICIT_GEMM)
+
+        # Exercise both algorithms — masked carries its own cache/dispatch path
+        # distinct from dense. A stale install may have one working and the
+        # other broken (e.g. the pre-round-2 aliased-to-dense fallback).
         coords = torch.tensor([[0, 0, 0, 0]], dtype=torch.int32).to('mps')
         feats = torch.zeros((1, 4), dtype=torch.float16).to('mps')
         weight = torch.zeros((4, 1, 1, 1, 4), dtype=torch.float16).to('mps')
-        out, _ = sparse_submanifold_conv3d(feats, coords, torch.Size([1, 4, 1, 1, 1]), weight)
-        return out.device.type == 'mps'
+        shape = torch.Size([1, 4, 1, 1, 1])
+
+        for algo in (Algorithm.IMPLICIT_GEMM, Algorithm.MASKED_IMPLICIT_GEMM):
+            set_algorithm(algo)
+            out, _ = sparse_submanifold_conv3d(feats, coords, shape, weight)
+            if out.device.type != 'mps':
+                return False
+        return True
     except Exception:
         return False
 
