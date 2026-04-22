@@ -2,8 +2,13 @@
 # NO: flash_attn, spconv, torchsparse (CUDA-only)
 
 # Core
-torch>=2.2.0
-torchvision>=0.17.0
+# torch >= 2.11.0 is required because mtlgemm's metal_context.mm calls
+# at::mps::dispatch_sync_with_rethrow, which was promoted from
+# at::native::mps:: to at::mps:: in PyTorch 2.11 (PR #167445, merged
+# 2025-11-11). Earlier stable versions (2.6 – 2.10) only expose it under
+# at::native::mps:: and won't link.
+torch>=2.11.0
+torchvision>=0.26.0
 transformers>=4.40.0,<5
 safetensors
 huggingface_hub
