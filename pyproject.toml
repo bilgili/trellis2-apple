@@ -29,6 +29,8 @@ dependencies = [
     "imageio-ffmpeg",
     "scipy",
     "einops",
+    # imported unconditionally by trellis2.pipelines.samplers.flow_euler et al.
+    "easydict",
     # BiRefNet (rembg) trust_remote_code deps
     "kornia",
     "timm",
