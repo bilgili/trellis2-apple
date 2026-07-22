@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trellis2"
+version = "0.1.0"
+description = "Microsoft TRELLIS.2 image-to-3D with Apple Silicon (MLX/Metal) and CUDA backends"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    # torch >= 2.11 required: mtlgemm links against at::mps::dispatch_sync_with_rethrow
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "transformers>=4.40.0,<5",
+    # transformers 4.x hard-refuses huggingface-hub 1.x
+    "huggingface-hub<1.0",
+    "safetensors",
+    "pillow",
+    "numpy",
+    "trimesh",
+    "xatlas",
+    "fast-simplification",
+    "pygltflib",
+    "opencv-python-headless",
+    "tqdm",
+    "imageio",
+    "imageio-ffmpeg",
+    "scipy",
+    "einops",
+    # BiRefNet (rembg) trust_remote_code deps
+    "kornia",
+    "timm",
+    "mlx>=0.31.0 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+# Metal GPU packages (mtldiffrast, cumesh, flex_gemm, mtlbvh) and o_voxel are
+# intentionally NOT dependencies: they must be installed in a second pass with
+# `pip install --no-build-isolation` after torch is present. See README.
+[project.optional-dependencies]
+server = ["fastapi", "uvicorn[standard]", "pydantic>=2.0"]
+
+[tool.setuptools.packages.find]
+include = ["trellis2*", "mlx_backend*"]
